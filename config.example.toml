@@ -1,0 +1,11 @@
+data_directory = "/data"
+
+[auth]
+username = "admin"
+password = "..."
+
+[mqtt]
+host = "mqtt.example"
+port = 1883
+username = "homeassistant"
+password = "..."

@@ -1,0 +1,13 @@
+services:
+  shelly-ha-extras:
+    container_name: shelly-ha-extras
+    build: ./src
+    image: shelly-ha-extras
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./config.toml:/config.toml:ro
+      - ./data:/data
+    environment:
+      SHELLY_HA_EXTRAS_CONFIG_FILE: "/config.toml"
+      SHELLY_HA_EXTRAS_LOGGING_LEVEL: "info"
