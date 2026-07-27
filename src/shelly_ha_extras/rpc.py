@@ -137,8 +137,8 @@ class ShellyRPC:
         request: dict[str, Any] = {"id": request_id, "src": self.src, "method": method}
         if params is not None:
             request["params"] = params
-        await self._socket.send(json.dumps(request, separators=(",", ":")))
         try:
+            await self._socket.send(json.dumps(request, separators=(",", ":")))
             reply = await asyncio.wait_for(future, timeout)
         except BaseException:
             self._pending.pop(request_id, None)

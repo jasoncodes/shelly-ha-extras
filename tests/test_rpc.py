@@ -105,6 +105,20 @@ class CorrelatingSocket:
         return None
 
 
+class FailingSendSocket:
+    async def send(self, _raw):
+        raise ConnectionError("socket closed")
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def close(self):
+        return None
+
+
 @pytest.mark.asyncio
 async def test_rpc_ignores_interleaved_notifications_and_correlates_ids():
     socket = CorrelatingSocket()
@@ -117,3 +131,17 @@ async def test_rpc_ignores_interleaved_notifications_and_correlates_ids():
         assert await rpc.call("Two") == {"ok": True}
     assert [message["id"] for message in socket.sent] == [1, 2]
     assert socket.sent[0]["src"] == socket.sent[1]["src"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_removes_pending_future_when_send_fails():
+    socket = FailingSendSocket()
+
+    async def connect(_uri):
+        return socket
+
+    async with ShellyRPC("device.local", connect=connect) as rpc:
+        with pytest.raises(ConnectionError, match="socket closed"):
+            await rpc.call("One")
+
+    assert rpc._pending == {}
