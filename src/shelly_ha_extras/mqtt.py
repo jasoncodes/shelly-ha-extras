@@ -257,7 +257,7 @@ def _merge_advertisements(
 
 
 class AdvertisementFailures:
-    """Suppress retries until a failed mDNS advertisement disappears or changes."""
+    """Track advertisements needing a retry on the next independent scan."""
 
     def __init__(self) -> None:
         self._failed: set[tuple[Any, ...]] = set()
@@ -268,6 +268,12 @@ class AdvertisementFailures:
 
     def should_attempt(self, item: DiscoveredDevice | str) -> bool:
         return _advertisement_key(item) not in self._failed
+
+    def has_failed(self, discovered: Sequence[DiscoveredDevice | str]) -> bool:
+        return any(_advertisement_key(item) in self._failed for item in discovered)
+
+    def clear(self, item: DiscoveredDevice | str) -> None:
+        self._failed.discard(_advertisement_key(item))
 
     def record_failure(self, item: DiscoveredDevice | str) -> None:
         self._failed.add(_advertisement_key(item))
@@ -316,8 +322,9 @@ class MQTTBridge:
 
     def mark_offline(self, device: Device) -> None:
         LOGGER.debug("publishing device availability offline for %s", device_key(device))
-        self.set_device_connected(device, False)
+        self.connected[device_key(device)] = False
         t = topics(self.config, device)
+        self.client.publish(t["availability"], "offline", retain=True)
         self.client.publish(
             t["state"],
             json.dumps(state_payload(device, self.latest.get(device_key(device)))),
@@ -547,6 +554,7 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
         next_probe = time.monotonic() + config.discovery.probe_seconds
         while True:
             command_wakeup = bridge.command_event.is_set()
+            periodic_probe = False
             startup_cycle = initial_discovered is not None
             if command_wakeup:
                 bridge.command_event.clear()
@@ -570,9 +578,11 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                     except Exception as exc:
                         LOGGER.debug("periodic discovery probe failed: %s", exc)
                     else:
+                        periodic_probe = True
+                        scanned = [item for item in scanned if isinstance(item, DiscoveredDevice)]
+                        watcher.reconcile_scan(scanned)
                         discovered = _merge_advertisements(
-                            discovered,
-                            [item for item in scanned if isinstance(item, DiscoveredDevice)],
+                            watcher.snapshot(), scanned
                         )
                         LOGGER.debug(
                             "periodic discovery probe found %d advertisements", len(scanned)
@@ -584,11 +594,18 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                 )
             )
             command_wakeup = command_wakeup or bridge.command_event.is_set()
-            if not command_wakeup and not startup_cycle and signature == last_signature:
+            unchanged = not command_wakeup and not startup_cycle and signature == last_signature
+            retry_only = (
+                unchanged and periodic_probe and advertisement_failures.has_failed(discovered)
+            )
+            if unchanged and not retry_only:
                 continue
             if not command_wakeup:
                 last_signature = signature
-            LOGGER.info("discovery cycle found %d service advertisements", len(discovered))
+            if retry_only:
+                LOGGER.debug("retrying failed advertisements after periodic probe")
+            else:
+                LOGGER.info("discovery cycle found %d service advertisements", len(discovered))
             if not command_wakeup:
                 advertisement_failures.reconcile(discovered)
             devices: list[Device] = []
@@ -603,7 +620,9 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                     if advertisement in seen_advertisements:
                         continue
                     seen_advertisements.add(advertisement)
-                if not advertisement_failures.should_attempt(item):
+                if retry_only and advertisement_failures.should_attempt(item):
+                    continue
+                if not retry_only and not advertisement_failures.should_attempt(item):
                     LOGGER.debug("skipping failed unchanged advertisement for %s", target)
                     continue
                 try:
@@ -623,20 +642,22 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                     LOGGER.warning("could not refresh device %s: %s", target, exc)
                     advertisement_failures.record_failure(item)
                     continue
+                advertisement_failures.clear(item)
                 devices.append(device)
                 LOGGER.info("found device %s at %s", device.id, target)
                 known_targets[device_key(device)] = target
                 store.observe(device)
                 bridge.publish_device(device, latest)
                 sessions.ensure(device, target, config.discovery.interval_seconds)
-            if not command_wakeup:
+            if not command_wakeup and not retry_only:
                 for stale_id in set(sessions.sessions) - seen_ids:
                     LOGGER.info("removing RPC session for disappeared device %s", stale_id)
                     stale_session = sessions.sessions.pop(stale_id)
                     bridge.mark_offline(stale_session.device)
                     stale_session.stop()
-            bridge.birth(devices)
-            LOGGER.info("published %d active devices", len(devices))
+            if not retry_only:
+                bridge.birth(devices)
+                LOGGER.info("published %d active devices", len(devices))
 
             while True:
                 try:

@@ -17,6 +17,18 @@ class FakeMQTT:
         self.published.append((topic, payload, retain))
 
 
+def test_mark_offline_republishes_retained_availability():
+    device = Device("test-device", "Test", "Mini1PMG3", "shellyplus1", "1.0")
+    client = FakeMQTT()
+    bridge = MQTTBridge(Config(), client=client)
+    bridge.set_device_connected(device, False)
+    client.published.clear()
+
+    bridge.mark_offline(device)
+
+    assert client.published[0] == (topics(Config(), device)["availability"], "offline", True)
+
+
 @pytest.mark.asyncio
 async def test_rpc_failure_marks_device_offline_and_discovery_keeps_it_offline(monkeypatch):
     device = Device("test-device", "Test", "Mini1PMG3", "shellyplus1", "1.0")

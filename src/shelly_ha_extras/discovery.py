@@ -19,6 +19,7 @@ class DiscoveredDevice:
     addresses: tuple[str, ...]
     port: int
     properties: dict[str, str]
+    service_name: str = ""
 
 
 def connection_target(device: DiscoveredDevice) -> str:
@@ -47,6 +48,7 @@ class DiscoveryWatcher:
 
     def __init__(self) -> None:
         self._found: dict[str, DiscoveredDevice] = {}
+        self._scan_misses: dict[str, int] = {}
         self._lock = threading.Lock()
         self._changed = threading.Event()
         self._zc: Any = None
@@ -74,9 +76,11 @@ class DiscoveryWatcher:
                             _decode_txt(k): _decode_txt(v)
                             for k, v in service.properties.items()
                         },
+                        name,
                     )
                     with owner._lock:
                         owner._found[name] = device
+                        owner._scan_misses.pop(name, None)
                     owner._changed.set()
 
             def update_service(self, zc: Any, service_type: str, name: str) -> None:
@@ -85,6 +89,7 @@ class DiscoveryWatcher:
             def remove_service(self, zc: Any, service_type: str, name: str) -> None:
                 with owner._lock:
                     device = owner._found.pop(name, None)
+                    owner._scan_misses.pop(name, None)
                 if device is not None:
                     LOGGER.info("mDNS service removed %s (%s)", name, device.hostname)
                 owner._changed.set()
@@ -104,6 +109,27 @@ class DiscoveryWatcher:
         with self._lock:
             return sorted(self._found.values(), key=lambda d: d.hostname.lower())
 
+    def reconcile_scan(self, scanned: list[DiscoveredDevice]) -> None:
+        """Retire services absent from two successful independent scans."""
+        present = {device.service_name for device in scanned if device.service_name}
+        removed: list[tuple[str, str]] = []
+        with self._lock:
+            for name, device in list(self._found.items()):
+                if name in present:
+                    self._scan_misses.pop(name, None)
+                    continue
+                misses = self._scan_misses.get(name, 0) + 1
+                if misses < 2:
+                    self._scan_misses[name] = misses
+                    continue
+                del self._found[name]
+                self._scan_misses.pop(name, None)
+                removed.append((name, device.hostname))
+        for name, hostname in removed:
+            LOGGER.info("mDNS service absent from repeated scans %s (%s)", name, hostname)
+        if removed:
+            self._changed.set()
+
     def close(self) -> None:
         if self._browser:
             self._browser.cancel()
@@ -119,8 +145,8 @@ async def discover(timeout: float = 3.0) -> list[DiscoveredDevice]:
         raise DiscoveryError("zeroconf is required for scan fallback") from exc
 
     found: dict[str, DiscoveredDevice] = {}
-    names: dict[str, str] = {}
     pending: set[asyncio.Task[None]] = set()
+    resolving: dict[str, asyncio.Task[None]] = {}
 
     async def resolve(service_type: str, name: str) -> None:
         service = await zc.async_get_service_info(service_type, name)
@@ -128,20 +154,27 @@ async def discover(timeout: float = 3.0) -> list[DiscoveredDevice]:
             hostname = service.server.rstrip(".")
             addresses = tuple(str(address) for address in dict.fromkeys(service.parsed_addresses()))
             properties = {_decode_txt(k): _decode_txt(v) for k, v in service.properties.items()}
-            found[hostname] = DiscoveredDevice(hostname, addresses, service.port, properties)
-            names[name] = hostname
+            found[name] = DiscoveredDevice(hostname, addresses, service.port, properties, name)
 
     def on_service(zeroconf: Any, service_type: str, name: str, state_change: Any) -> None:
         from zeroconf import ServiceStateChange
 
+        previous = resolving.pop(name, None)
+        if previous is not None:
+            previous.cancel()
         if state_change is ServiceStateChange.Removed:
-            hostname = names.pop(name, None)
-            if hostname is not None:
-                found.pop(hostname, None)
+            found.pop(name, None)
             return
         task = asyncio.create_task(resolve(service_type, name))
         pending.add(task)
-        task.add_done_callback(pending.discard)
+        resolving[name] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            pending.discard(done)
+            if resolving.get(name) is done:
+                resolving.pop(name, None)
+
+        task.add_done_callback(finished)
 
     try:
         zc = AsyncZeroconf()
