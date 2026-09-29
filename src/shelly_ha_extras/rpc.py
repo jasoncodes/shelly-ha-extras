@@ -195,6 +195,12 @@ async def upload_firmware(
         await rpc.call("OTA.Start", {"size": size})
         while offset < size:
             chunk = firmware[offset : offset + chunk_size]
+            LOGGER.debug(
+                "OTA.Write request offset=%d chunk_size=%d firmware_size=%d",
+                offset,
+                len(chunk),
+                size,
+            )
             result = await rpc.call(
                 "OTA.Write",
                 {
@@ -204,6 +210,13 @@ async def upload_firmware(
             )
             acknowledged = result.get("offset")
             expected = offset + len(chunk)
+            LOGGER.debug(
+                "OTA.Write reply offset=%r request_offset=%d expected_max=%d firmware_size=%d",
+                acknowledged,
+                offset,
+                expected,
+                size,
+            )
             if (
                 not isinstance(acknowledged, int)
                 or isinstance(acknowledged, bool)
