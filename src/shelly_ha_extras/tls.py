@@ -63,7 +63,12 @@ def ssl_context(config: TLSConfig) -> ssl.SSLContext:
     if config.insecure_diagnostic:
         return ssl._create_unverified_context()
     if config.ca_file:
-        context = ssl.create_default_context(cadata=_ca_pem(config.ca_file))
+        # Shelly's self-signed CA predates X.509 basicConstraints. Recent
+        # Python versions enable VERIFY_X509_STRICT in create_default_context,
+        # which rejects that CA. A client context keeps certificate and
+        # hostname verification enabled while trusting only this supplied CA.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=_ca_pem(config.ca_file))
     else:
         context = ssl.create_default_context()
     return context
