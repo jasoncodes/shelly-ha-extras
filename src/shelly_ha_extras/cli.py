@@ -183,6 +183,7 @@ def firmware_check(
 ) -> None:
     """Compare TARGET with the latest official stable firmware."""
     cfg = _config(config_file)
+    _configure_logging(cfg)
     try:
         device = asyncio.run(
             get_device_info(target, username=cfg.auth.username, password=cfg.password_for(target))
@@ -220,6 +221,7 @@ def firmware_install(
 ) -> None:
     """Install the official stable firmware for TARGET."""
     cfg = _config(config_file, data_directory)
+    _configure_logging(cfg)
 
     async def run() -> dict[str, Any]:
         device = await get_device_info(
