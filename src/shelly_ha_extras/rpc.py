@@ -230,14 +230,16 @@ async def upload_firmware(
             ):
                 raise ProtocolError(f"OTA acknowledgement offset {acknowledged!r} is invalid")
             if acknowledged == offset:
-                if no_progress_retries >= 1:
+                if no_progress_retries >= 3:
                     raise ProtocolError(
-                        f"OTA acknowledgement offset {acknowledged} made no progress after retry"
+                        f"OTA acknowledgement offset {acknowledged} made no progress "
+                        f"after {no_progress_retries} retries"
                     )
                 no_progress_retries += 1
                 LOGGER.debug(
-                    "OTA.Write made no progress at offset=%d; retrying the same chunk once",
+                    "OTA.Write made no progress at offset=%d; retrying the same chunk (%d/3)",
                     offset,
+                    no_progress_retries,
                 )
                 await asyncio.sleep(0.25)
                 continue
