@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
@@ -11,6 +12,8 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 from .models import AuthenticationError, ProtocolError
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _digest(value: str, algorithm: str) -> str:
@@ -190,6 +193,7 @@ async def upload_firmware(
     if not required.issubset(methods):
         raise ProtocolError("device does not expose the complete OTA RPC surface")
     size = len(firmware)
+    no_progress_retries = 0
     offset = 0
     try:
         await rpc.call("OTA.Start", {"size": size})
@@ -220,12 +224,25 @@ async def upload_firmware(
             if (
                 not isinstance(acknowledged, int)
                 or isinstance(acknowledged, bool)
-                or acknowledged <= offset
+                or acknowledged < offset
                 or acknowledged > expected
                 or acknowledged > size
             ):
                 raise ProtocolError(f"OTA acknowledgement offset {acknowledged!r} is invalid")
+            if acknowledged == offset:
+                if no_progress_retries >= 1:
+                    raise ProtocolError(
+                        f"OTA acknowledgement offset {acknowledged} made no progress after retry"
+                    )
+                no_progress_retries += 1
+                LOGGER.debug(
+                    "OTA.Write made no progress at offset=%d; retrying the same chunk once",
+                    offset,
+                )
+                await asyncio.sleep(0.25)
+                continue
             offset = acknowledged
+            no_progress_retries = 0
             if progress:
                 value = progress(offset, size)
                 if asyncio.iscoroutine(value):
