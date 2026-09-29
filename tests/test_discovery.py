@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from zeroconf import ServiceStateChange
 
 from shelly_ha_extras.discovery import (
     SHELLY_SERVICE_TYPE,
@@ -8,6 +9,7 @@ from shelly_ha_extras.discovery import (
     DiscoveryWatcher,
     _decode_txt,
     connection_target,
+    discover,
 )
 from shelly_ha_extras.mqtt import AdvertisementFailures, _merge_advertisements
 
@@ -54,6 +56,46 @@ def test_watcher_removes_only_matching_service(monkeypatch, second_hostname):
     browser.listener.remove_service(browser.zc, browser.service_type, alias_name)
     assert watcher.snapshot() == []
     watcher.close()
+
+
+@pytest.mark.asyncio
+async def test_async_scan_accepts_zeroconf_callback_keywords(monkeypatch):
+    class FakeZeroconf:
+        def __init__(self):
+            self.zeroconf = self
+
+        async def async_get_service_info(self, service_type, name):
+            assert service_type == SHELLY_SERVICE_TYPE
+            assert name == "timer._shelly._tcp.local."
+            return SimpleNamespace(
+                server="timer.local.",
+                port=80,
+                properties={b"gen": b"3"},
+                parsed_addresses=lambda: ["192.0.2.10"],
+            )
+
+        async def async_close(self):
+            pass
+
+    class FakeBrowser:
+        def __init__(self, zeroconf, service_type, handlers):
+            assert service_type == SHELLY_SERVICE_TYPE
+            handlers[0](
+                zeroconf=zeroconf,
+                service_type=service_type,
+                name="timer._shelly._tcp.local.",
+                state_change=ServiceStateChange.Added,
+            )
+
+        async def async_cancel(self):
+            pass
+
+    monkeypatch.setattr("zeroconf.asyncio.AsyncZeroconf", FakeZeroconf)
+    monkeypatch.setattr("zeroconf.asyncio.AsyncServiceBrowser", FakeBrowser)
+
+    assert await discover(0.01) == [
+        DiscoveredDevice("timer.local", ("192.0.2.10",), 80, {"gen": "3"})
+    ]
 
 
 def test_shelly_specific_service_and_txt_decoding():

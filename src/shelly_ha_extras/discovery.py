@@ -114,39 +114,51 @@ class DiscoveryWatcher:
 async def discover(timeout: float = 3.0) -> list[DiscoveredDevice]:
     """Discover Shelly devices via the Shelly-specific DNS-SD service."""
     try:
-        from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+        from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
     except ImportError as exc:
         raise DiscoveryError("zeroconf is required for scan fallback") from exc
 
     found: dict[str, DiscoveredDevice] = {}
+    names: dict[str, str] = {}
+    pending: set[asyncio.Task[None]] = set()
 
-    class Listener(ServiceListener):
-        def add_service(self, zc: Any, service_type: str, name: str) -> None:
-            service = zc.get_service_info(service_type, name)
-            if service:
-                hostname = service.server.rstrip(".")
-                addresses = tuple(
-                    str(address) for address in dict.fromkeys(service.parsed_addresses())
-                )
-                properties = {_decode_txt(k): _decode_txt(v) for k, v in service.properties.items()}
-                found[hostname] = DiscoveredDevice(hostname, addresses, service.port, properties)
+    async def resolve(service_type: str, name: str) -> None:
+        service = await zc.async_get_service_info(service_type, name)
+        if service and service.server is not None and service.port is not None:
+            hostname = service.server.rstrip(".")
+            addresses = tuple(str(address) for address in dict.fromkeys(service.parsed_addresses()))
+            properties = {_decode_txt(k): _decode_txt(v) for k, v in service.properties.items()}
+            found[hostname] = DiscoveredDevice(hostname, addresses, service.port, properties)
+            names[name] = hostname
 
-        def update_service(self, zc: Any, service_type: str, name: str) -> None:
-            self.add_service(zc, service_type, name)
+    def on_service(zeroconf: Any, service_type: str, name: str, state_change: Any) -> None:
+        from zeroconf import ServiceStateChange
 
-        def remove_service(self, zc: Any, service_type: str, name: str) -> None:
-            service = zc.get_service_info(service_type, name)
-            if service:
-                found.pop(service.server.rstrip("."), None)
+        if state_change is ServiceStateChange.Removed:
+            hostname = names.pop(name, None)
+            if hostname is not None:
+                found.pop(hostname, None)
+            return
+        task = asyncio.create_task(resolve(service_type, name))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     try:
-        zc = Zeroconf()
-        browser = ServiceBrowser(zc, SHELLY_SERVICE_TYPE, Listener())
+        zc = AsyncZeroconf()
     except OSError as exc:
         raise DiscoveryError(f"could not open the mDNS socket: {exc}") from exc
     try:
+        browser = AsyncServiceBrowser(zc.zeroconf, SHELLY_SERVICE_TYPE, handlers=[on_service])
+    except BaseException:
+        await zc.async_close()
+        raise
+    try:
         await asyncio.sleep(timeout)
     finally:
-        browser.cancel()
-        zc.close()
+        await browser.async_cancel()
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        await zc.async_close()
     return sorted(found.values(), key=lambda d: d.hostname.lower())
