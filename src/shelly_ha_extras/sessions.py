@@ -37,6 +37,7 @@ class ShellySession:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._rpc: ShellyRPC | None = None
         self._stop_async: asyncio.Event | None = None
+        self._retry_async: asyncio.Event | None = None
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._stop = threading.Event()
         self._ready = threading.Event()
@@ -54,8 +55,17 @@ class ShellySession:
         self._stop.set()
         loop = self._loop
         if loop:
-            loop.call_soon_threadsafe(self._stop_async.set if self._stop_async else lambda: None)
+            if self._stop_async:
+                loop.call_soon_threadsafe(self._stop_async.set)
+            if self._retry_async:
+                loop.call_soon_threadsafe(self._retry_async.set)
         self._thread.join(timeout=5)
+
+    def request_reconnect(self) -> None:
+        loop = self._loop
+        retry = self._retry_async
+        if loop and retry and not self._ready.is_set():
+            loop.call_soon_threadsafe(retry.set)
 
     def update(
         self,
@@ -85,8 +95,10 @@ class ShellySession:
     async def _run(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._stop_async = asyncio.Event()
+        self._retry_async = asyncio.Event()
         backoff = 1.0
         while not self._stop.is_set():
+            retry_delay = 0.0
             try:
                 async with ShellyRPC(
                     self.target,
@@ -97,6 +109,7 @@ class ShellySession:
                     self._rpc = rpc
                     self._ready.set()
                     self._set_connected(True)
+                    self._retry_async.clear()
                     backoff = 1.0
                     LOGGER.info("Shelly RPC session connected for %s", self.device.id)
                     self.on_snapshot(self.device, await list_schedules(rpc))
@@ -111,12 +124,18 @@ class ShellySession:
                 raise
             except Exception as exc:
                 LOGGER.warning("Shelly RPC session failed for %s: %s", self.device.id, exc)
-                await asyncio.sleep(backoff)
+                retry_delay = backoff
                 backoff = min(backoff * 2, 60.0)
             finally:
                 self._rpc = None
                 self._ready.clear()
                 self._set_connected(False)
+            if retry_delay and not self._stop.is_set():
+                try:
+                    await asyncio.wait_for(self._retry_async.wait(), timeout=retry_delay)
+                except TimeoutError:
+                    pass
+                self._retry_async.clear()
 
     def _notification(self, message: dict[str, Any]) -> None:
         if "schedule_rev" in repr(message):
@@ -144,9 +163,18 @@ class SessionManager:
         self.on_connection_change = on_connection_change
         self.sessions: dict[str, ShellySession] = {}
 
-    def ensure(self, device: Device, target: str, refresh_seconds: float = 300.0) -> ShellySession:
+    def ensure(
+        self,
+        device: Device,
+        target: str,
+        refresh_seconds: float = 300.0,
+        *,
+        reconnect: bool = False,
+    ) -> ShellySession:
         session = self.sessions.get(device.id)
         if session and session.target == target:
+            if reconnect:
+                session.request_reconnect()
             return session
         if session:
             session.stop()

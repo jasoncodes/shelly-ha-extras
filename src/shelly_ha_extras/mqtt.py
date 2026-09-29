@@ -481,6 +481,7 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
     )
     active_updates: set[str] = set()
     active_updates_lock = threading.Lock()
+    completed_updates: queue.SimpleQueue[tuple[str, str, Device]] = queue.SimpleQueue()
 
     def run_firmware_update(key: str, target: str, device: Device) -> None:
         worker_http = ShellyHTTP(config.tls)
@@ -527,6 +528,8 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
             )
             bridge.publish_device(result, info)
             LOGGER.info("firmware update completed for %s at %s", key, result.version)
+            completed_updates.put((key, target, result))
+            bridge.command_event.set()
         except Exception as exc:
             LOGGER.error("firmware update failed for %s: %s", key, exc)
             if info is not None:
@@ -634,6 +637,17 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                     stale_session.stop()
             bridge.birth(devices)
             LOGGER.info("published %d active devices", len(devices))
+
+            while True:
+                try:
+                    key, target, result = completed_updates.get_nowait()
+                except queue.Empty:
+                    break
+                known_targets[key] = target
+                store.observe(result)
+                sessions.ensure(
+                    result, target, config.discovery.interval_seconds, reconnect=True
+                )
 
             while True:
                 try:
