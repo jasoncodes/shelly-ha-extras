@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import threading
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, cast
 from .models import DiscoveryError
 
 SHELLY_SERVICE_TYPE = "_shelly._tcp.local."
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,17 +76,17 @@ class DiscoveryWatcher:
                         },
                     )
                     with owner._lock:
-                        owner._found[device.hostname] = device
+                        owner._found[name] = device
                     owner._changed.set()
 
             def update_service(self, zc: Any, service_type: str, name: str) -> None:
                 self.add_service(zc, service_type, name)
 
             def remove_service(self, zc: Any, service_type: str, name: str) -> None:
-                service = zc.get_service_info(service_type, name)
-                hostname = service.server.rstrip(".") if service else name.split(".")[0]
                 with owner._lock:
-                    owner._found.pop(hostname, None)
+                    device = owner._found.pop(name, None)
+                if device is not None:
+                    LOGGER.info("mDNS service removed %s (%s)", name, device.hostname)
                 owner._changed.set()
 
         try:

@@ -1,10 +1,59 @@
+from types import SimpleNamespace
+
+import pytest
+
 from shelly_ha_extras.discovery import (
     SHELLY_SERVICE_TYPE,
     DiscoveredDevice,
+    DiscoveryWatcher,
     _decode_txt,
     connection_target,
 )
 from shelly_ha_extras.mqtt import AdvertisementFailures, _merge_advertisements
+
+
+@pytest.mark.parametrize("second_hostname", ["Test-Switch.local.", "Other-Name.local."])
+def test_watcher_removes_only_matching_service(monkeypatch, second_hostname):
+    service_name = "Shelly1PMMiniG3-48F6EEB92984._shelly._tcp.local."
+    alias_name = "Test-Switch._shelly._tcp.local."
+
+    class FakeZeroconf:
+        def get_service_info(self, _service_type, _name):
+            return SimpleNamespace(
+                server=second_hostname if _name == alias_name else "Test-Switch.local.",
+                port=80,
+                properties={},
+                parsed_addresses=lambda: ["192.0.2.10"],
+            )
+
+        def close(self):
+            pass
+
+    class FakeBrowser:
+        def __init__(self, zc, service_type, listener):
+            self.listener = listener
+            self.zc = zc
+            self.service_type = service_type
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("zeroconf.Zeroconf", FakeZeroconf)
+    monkeypatch.setattr("zeroconf.ServiceBrowser", FakeBrowser)
+    watcher = DiscoveryWatcher()
+    watcher.start()
+    browser = watcher._browser
+    browser.listener.add_service(browser.zc, browser.service_type, service_name)
+    browser.listener.add_service(browser.zc, browser.service_type, alias_name)
+    assert len(watcher.snapshot()) == 2
+
+    browser.listener.remove_service(browser.zc, browser.service_type, service_name)
+    assert watcher.snapshot() == [
+        DiscoveredDevice(second_hostname.rstrip("."), ("192.0.2.10",), 80, {})
+    ]
+    browser.listener.remove_service(browser.zc, browser.service_type, alias_name)
+    assert watcher.snapshot() == []
+    watcher.close()
 
 
 def test_shelly_specific_service_and_txt_decoding():
