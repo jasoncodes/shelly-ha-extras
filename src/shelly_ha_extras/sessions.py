@@ -24,6 +24,7 @@ class ShellySession:
         username: str,
         password: str | None,
         on_snapshot: Callable[[Device, ScheduleSnapshot], None],
+        on_connection_change: Callable[[Device, bool], None],
         refresh_seconds: float = 300.0,
     ) -> None:
         self.device = device
@@ -31,6 +32,7 @@ class ShellySession:
         self.username = username
         self.password = password
         self.on_snapshot = on_snapshot
+        self.on_connection_change = on_connection_change
         self.refresh_seconds = refresh_seconds
         self._loop: asyncio.AbstractEventLoop | None = None
         self._rpc: ShellyRPC | None = None
@@ -38,6 +40,12 @@ class ShellySession:
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._stop = threading.Event()
         self._ready = threading.Event()
+        self._connected: bool | None = None
+
+    def _set_connected(self, connected: bool) -> None:
+        if self._connected != connected:
+            self._connected = connected
+            self.on_connection_change(self.device, connected)
 
     def start(self) -> None:
         self._thread.start()
@@ -88,6 +96,7 @@ class ShellySession:
                 ) as rpc:
                     self._rpc = rpc
                     self._ready.set()
+                    self._set_connected(True)
                     backoff = 1.0
                     LOGGER.info("Shelly RPC session connected for %s", self.device.id)
                     self.on_snapshot(self.device, await list_schedules(rpc))
@@ -107,6 +116,7 @@ class ShellySession:
             finally:
                 self._rpc = None
                 self._ready.clear()
+                self._set_connected(False)
 
     def _notification(self, message: dict[str, Any]) -> None:
         if "schedule_rev" in repr(message):
@@ -126,10 +136,12 @@ class SessionManager:
         username: str,
         password_for: Callable[[str], str | None],
         on_snapshot: Callable[[Device, ScheduleSnapshot], None],
+        on_connection_change: Callable[[Device, bool], None],
     ) -> None:
         self.username = username
         self.password_for = password_for
         self.on_snapshot = on_snapshot
+        self.on_connection_change = on_connection_change
         self.sessions: dict[str, ShellySession] = {}
 
     def ensure(self, device: Device, target: str, refresh_seconds: float = 300.0) -> ShellySession:
@@ -144,6 +156,7 @@ class SessionManager:
             username=self.username,
             password=self.password_for(device.id),
             on_snapshot=self.on_snapshot,
+            on_connection_change=self.on_connection_change,
             refresh_seconds=refresh_seconds,
         )
         self.sessions[device.id] = session

@@ -288,6 +288,7 @@ class MQTTBridge:
                 self.client.username_pw_set(config.mqtt.username, config.mqtt.password)
         self.devices: dict[str, Device] = {}
         self.latest: dict[str, UpdateInfo | None] = {}
+        self.connected: dict[str, bool] = {}
         self.command_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.command_event = threading.Event()
         self.schedules: dict[str, ScheduleSnapshot] = {}
@@ -315,11 +316,22 @@ class MQTTBridge:
 
     def mark_offline(self, device: Device) -> None:
         LOGGER.debug("publishing device availability offline for %s", device_key(device))
+        self.set_device_connected(device, False)
         t = topics(self.config, device)
-        self.client.publish(t["availability"], "offline", retain=True)
         self.client.publish(
             t["state"],
             json.dumps(state_payload(device, self.latest.get(device_key(device)))),
+            retain=True,
+        )
+
+    def set_device_connected(self, device: Device, connected: bool) -> None:
+        key = device_key(device)
+        if self.connected.get(key) == connected:
+            return
+        self.connected[key] = connected
+        self.client.publish(
+            topics(self.config, device)["availability"],
+            "online" if connected else "offline",
             retain=True,
         )
 
@@ -339,7 +351,11 @@ class MQTTBridge:
         self.client.publish(
             t["discovery"], json.dumps(discovery_payload(self.config, device)), retain=True
         )
-        self.client.publish(t["availability"], "online" if available else "offline", retain=True)
+        self.client.publish(
+            t["availability"],
+            "online" if available and self.connected.get(device_key(device), True) else "offline",
+            retain=True,
+        )
         self.client.publish(
             t["state"],
             json.dumps(
@@ -461,6 +477,7 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
         username=config.auth.username,
         password_for=config.password_for,
         on_snapshot=bridge.publish_schedules,
+        on_connection_change=bridge.set_device_connected,
     )
     active_updates: set[str] = set()
     active_updates_lock = threading.Lock()
