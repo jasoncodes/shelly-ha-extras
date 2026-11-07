@@ -89,6 +89,7 @@ def discovery_payload(config: Config, device: Device) -> dict[str, Any]:
             **({"connections": [["mac", device.mac]]} if device.mac else {}),
         },
         "state_topic": t["state"],
+        "release_url": "https://shelly-api-docs.shelly.cloud/gen2/changelog/",
         "command_topic": t["command"],
         "payload_install": INSTALL_COMMAND,
         "availability": [
