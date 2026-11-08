@@ -29,6 +29,29 @@ def test_mark_offline_republishes_retained_availability():
     assert client.published[0] == (topics(Config(), device)["availability"], "offline", True)
 
 
+@pytest.mark.parametrize("method", ["stop", "request_reconnect"])
+def test_session_can_be_signalled_after_worker_exits(monkeypatch, method):
+    async def run(session):
+        session._loop = asyncio.get_running_loop()
+        session._stop_async = asyncio.Event()
+        session._retry_async = asyncio.Event()
+
+    monkeypatch.setattr(sessions.ShellySession, "_run", run)
+    session = sessions.ShellySession(
+        Device("test-device", "Test", "Mini1PMG3", "shellyplus1", "1.0"),
+        "192.0.2.10",
+        username="admin",
+        password=None,
+        on_snapshot=lambda *_: None,
+        on_connection_change=lambda *_: None,
+    )
+    session.start()
+    session._thread.join(timeout=5)
+    assert not session._thread.is_alive()
+
+    getattr(session, method)()
+
+
 @pytest.mark.asyncio
 async def test_rpc_failure_marks_device_offline_and_discovery_keeps_it_offline(monkeypatch):
     device = Device("test-device", "Test", "Mini1PMG3", "shellyplus1", "1.0")

@@ -53,19 +53,24 @@ class ShellySession:
 
     def stop(self) -> None:
         self._stop.set()
-        loop = self._loop
-        if loop:
-            if self._stop_async:
-                loop.call_soon_threadsafe(self._stop_async.set)
-            if self._retry_async:
-                loop.call_soon_threadsafe(self._retry_async.set)
+        self._signal(self._stop_async)
+        self._signal(self._retry_async)
         self._thread.join(timeout=5)
 
     def request_reconnect(self) -> None:
+        if not self._ready.is_set():
+            self._signal(self._retry_async)
+
+    def _signal(self, event: asyncio.Event | None) -> None:
         loop = self._loop
-        retry = self._retry_async
-        if loop and retry and not self._ready.is_set():
-            loop.call_soon_threadsafe(retry.set)
+        if loop is None or event is None:
+            return
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            # The worker can close its loop while we are submitting the signal.
+            if not loop.is_closed():
+                raise
 
     def update(
         self,
