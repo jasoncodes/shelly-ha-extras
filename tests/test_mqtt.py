@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -6,8 +7,10 @@ from shelly_ha_extras.models import Device, UpdateInfo
 from shelly_ha_extras.mqtt import (
     INSTALL_COMMAND,
     KnownDeviceStore,
+    MQTTBridge,
     discovery_payload,
     state_payload,
+    topics,
 )
 
 
@@ -43,3 +46,33 @@ def test_known_device_cleanup_after_seven_days(tmp_path: Path):
     assert removed == ["shelly1-ABC"]
     store.save()
     assert (tmp_path / "known.json").exists()
+
+
+def test_upload_progress_publishes_only_retained_firmware_state():
+    class FakeMQTT:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, topic, payload, retain=False):
+            self.published.append((topic, payload, retain))
+
+    client = FakeMQTT()
+    bridge = MQTTBridge(Config(), client=client)
+    current = device()
+    latest = UpdateInfo(current.app, "1.1.0", "https://updates.shelly.cloud/a.zip")
+    bridge.publish_device(current, latest)
+    client.published.clear()
+
+    for percentage in (0, 27, 100):
+        bridge.publish_firmware_state(current, latest, in_progress=True, percentage=percentage)
+
+    assert len(client.published) == 3
+    for (topic, payload, retain), percentage in zip(client.published, (0, 27, 100)):
+        assert topic == topics(Config(), current)["state"]
+        assert retain is True
+        assert json.loads(payload) == {
+            "installed_version": "1.0.0",
+            "latest_version": "1.1.0",
+            "in_progress": True,
+            "update_percentage": percentage,
+        }

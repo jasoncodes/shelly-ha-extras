@@ -364,8 +364,18 @@ class MQTTBridge:
             "online" if available and self.connected.get(device_key(device), True) else "offline",
             retain=True,
         )
+        self.publish_firmware_state(device, latest, in_progress=in_progress, percentage=percentage)
+
+    def publish_firmware_state(
+        self,
+        device: Device,
+        latest: UpdateInfo | None = None,
+        *,
+        in_progress: bool = False,
+        percentage: float = 0.0,
+    ) -> None:
         self.client.publish(
-            t["state"],
+            topics(self.config, device)["state"],
             json.dumps(
                 state_payload(
                     device,
@@ -501,7 +511,7 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                 return
             require_official(info)
             LOGGER.info("starting firmware update for %s to %s", key, info.version)
-            bridge.publish_device(device, info, in_progress=True, percentage=0)
+            bridge.publish_firmware_state(device, info, in_progress=True, percentage=0)
             path = cache_path(config.cache.directory, info)
             if path.exists():
                 validate_zip(path, expected_size=info.size, expected_sha256=info.sha256)
@@ -520,7 +530,7 @@ def serve_forever(config: Config, scanner: Callable[[], Any]) -> None:
                 if percentage == last_percentage:
                     return
                 last_percentage = percentage
-                bridge.publish_device(device, info, in_progress=True, percentage=percentage)
+                bridge.publish_firmware_state(device, info, in_progress=True, percentage=percentage)
 
             result = asyncio.run(
                 install(
